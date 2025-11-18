@@ -50,6 +50,8 @@ class Figure(QObject, Object, Observer):
             radius=base.radius
         )
         self._selected = False
+        
+        self._move_master = None   # type: Figure | None
 
     @property
     def ess(self) -> DrawEssentials:
@@ -213,19 +215,26 @@ class Figure(QObject, Object, Observer):
         self.notify_move(dx, dy, event, bounds)
 
     def update(self, subject: Any, event: Event) -> None:
-        # игнорируем событие, если уже участвовали в цепочке — предотвращает двойное движение
+        # защита от циклов
         if event is not None and event.visited and id(self) in event.visited:
             return
 
-        # реакция на сдвиг от другой фигуры
         if event.type == "moved":
             payload = event.payload or {}
             subject_obj = payload.get("obj", None)
             if subject_obj is self or subject_obj is None:
-                # игнорируем собственные события или некорректные
                 return
-            # применять сдвиг к наблюдателю; не использовать bounds исходной фигуры,
-            # иначе проверка is_fit_in_bounds часто блокирует перемещение
+
+            # subject_obj – фигура, которая реально двигалась первой
+            if isinstance(subject_obj, Figure):
+                if self._move_master is None:
+                    # Первый, кто дёрнул меня – становится хозяином
+                    self._move_master = subject_obj
+                elif self._move_master is not subject_obj:
+                    # Это движение от другой стрелки – игнорируем
+                    return
+            # --------------------------------------
+
             print(f'Figure: {self} received move event:', payload)
             self.change_position(
                 dx=payload.get("dx"),
@@ -233,6 +242,7 @@ class Figure(QObject, Object, Observer):
                 bounds=payload.get("bounds"),
                 event=event
             )
+
 
 
 class FigureGroup(Figure):

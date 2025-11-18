@@ -6,6 +6,7 @@ import factory
 from settings import DrawSettings, DrawEssentials, ArrowTools
 from figures import Figure, FigureGroup, Hand
 from observer import Object, Event
+import weakref
 
 class FigureStorage(QObject, Object):
     canvas_updated = pyqtSignal()
@@ -13,6 +14,9 @@ class FigureStorage(QObject, Object):
     def __init__(self, settings: DrawSettings | None = None, cmd_manager=None):
         super().__init__()
         self.__figures = []
+        # Ordered timeline of selected figures (weakrefs) — сохраняет порядок выбора
+        self.__selected_timeline: list[weakref.ref] = []
+
         self.settings = settings if isinstance(settings, DrawSettings) else DrawSettings()
 
         # ссылка на менеджер команд для удобства создания команд изнутри хранилища
@@ -84,9 +88,34 @@ class FigureStorage(QObject, Object):
 
     def get_all(self): return self.__figures
 
+    # --- helpers for ordered weak timeline ---
+    def _clean_selected_timeline(self):
+        # удалить мёртвые weakrefs
+        self.__selected_timeline = [r for r in self.__selected_timeline if r() is not None]
+
+    def _add_to_timeline(self, figure):
+        # не дублируем, сохраняем порядок
+        self._clean_selected_timeline()
+        for r in self.__selected_timeline:
+            if r() is figure:
+                return
+        self.__selected_timeline.append(weakref.ref(figure))
+
+    def _remove_from_timeline(self, figure):
+        self.__selected_timeline = [r for r in self.__selected_timeline if r() is not None and r() is not figure]
+
+    def _timeline_as_list(self):
+        self._clean_selected_timeline()
+        return [r() for r in self.__selected_timeline if r() is not None]
+    
+
     def select_figure(self, figure, state: bool = True):
         if figure in self.get_all():
             figure.selected = state
+            if state:
+                self._add_to_timeline(figure)
+            else:
+                self._remove_from_timeline(figure)
             self.canvas_updated.emit()
 
     def get_incomplete(self):
@@ -99,6 +128,7 @@ class FigureStorage(QObject, Object):
         return [f for f in self.__figures if getattr(f, "selected", False)]
 
     def deselect_all(self):
+        self.__selected_timeline.clear()
         changed = False
         for f in self.__figures:
             if getattr(f, "selected", False):
@@ -109,18 +139,42 @@ class FigureStorage(QObject, Object):
 
     def delete(self, figure):
         if figure in self.__figures:
+            # 1) убрать ссылку из списка фигур
             self.__figures.remove(figure)
+
+            # 2) удалить фигуру из observer-списков остальных фигур (чтобы стрелки/связи разорвались сразу)
+            for f in list(self.__figures):
+                try:
+                    f.remove_observer(figure)
+                except Exception:
+                    pass
+
+                # если есть группа — убрать ребёнка из группы
+                try:
+                    if isinstance(f, FigureGroup) and figure in f.figures:
+                        try:
+                            f.figures.remove(figure)
+                        except ValueError:
+                            pass
+                except Exception:
+                    pass
+
+            # явно убрать из timeline, чтобы не ждать GC
+            try:
+                self._remove_from_timeline(figure)
+            except Exception:
+                pass
+
             self.canvas_updated.emit()
 
     def delete_selected(self):
-        before = len(self.__figures)
-        self.__figures = [f for f in self.__figures if not getattr(f, "selected", False)]
-        if len(self.__figures) != before:
-            self.canvas_updated.emit()
+        fig = self.get_selected()
+        for f in fig:
+            self.delete(f)
 
     def clear_all(self):
-        self.__figures.clear()
-        self.canvas_updated.emit()
+        for f in self.get_all():
+            self.delete(f)
 
     def create_group(self, settings: DrawEssentials):
         selected = self.get_selected()
@@ -148,7 +202,9 @@ class FigureStorage(QObject, Object):
         """Обработать действие arrow-tool над выделенными фигурами."""
         print("Frame arrows action:", arrow_tool)
 
-        selected = self.get_selected()
+        current_selected = self.get_selected()
+        # берём элементы из timeline в порядке выбора, но только те, что сейчас выделены
+        selected = [fig for fig in self._timeline_as_list() if fig in current_selected]
 
         if len(selected) != 2:
             print("Need exactly two selected figures to apply frame arrows.")
@@ -179,6 +235,9 @@ class FigureStorage(QObject, Object):
                 fig2.remove_observer(fig1)
             except Exception:
                 pass
+
+            fig1._move_master = None
+            fig2._move_master = None
         self.canvas_updated.emit()
 
     def paint_arrows(self, painter: QPainter):

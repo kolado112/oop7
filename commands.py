@@ -168,6 +168,10 @@ class GroupCommand(Command):
         # удаляем фигуры и добавляем группу
         for f in self.figures:
             try:
+                # удаляем наблюдателей, чтобы не было утечек
+                observers = f.get_observers()
+                for obs in observers:
+                    f.remove_observer(obs)
                 self.storage.get_all().remove(f)
             except ValueError:
                 pass
